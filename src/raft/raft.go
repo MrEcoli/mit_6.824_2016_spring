@@ -395,7 +395,7 @@ func (rf *Raft) Kill() {
 }
 
 func heartbeatsTimeout() time.Duration {
-    return time.Duration(rand.Int31n(100) + 50)
+    return time.Duration(rand.Int31n(100) + 100)
 }
 
 //
@@ -541,7 +541,6 @@ func (rf *Raft) leaderSyncFollower(server int) {
                             rf.MatchIndex[server] = len(args.Data) + args.LastLogIndex - 1
                             rf.NextIndex[server] = len(args.Data) + args.LastLogIndex
 
-                            rf.mu.Lock()
                             if rf.CommitIndex < rf.MatchIndex[server] && rf.Logs[rf.MatchIndex[server]].Term == rf.CurrentTerm {
                                 count := 0
                                 for idx := range rf.peers {
@@ -554,10 +553,13 @@ func (rf *Raft) leaderSyncFollower(server int) {
                                     }
                                 }
                                 if count * 2 > len(rf.peers) {
+                                    rf.mu.Lock()
                                     rf.CommitIndex = rf.MatchIndex[server]
+                                    rf.mu.Unlock()
                                 }
                             }
                             if rf.CommitIndex > rf.LastApplied {
+                                rf.mu.Lock()
                                 for i := rf.LastApplied + 1; i <= rf.CommitIndex; i += 1 {
                                     if rf.Logs[i].Command != nil {
                                         msg := ApplyMsg{}
@@ -566,9 +568,9 @@ func (rf *Raft) leaderSyncFollower(server int) {
                                         rf.AppliedMsgs <- msg
                                     }
                                 }
+                                rf.mu.Unlock()
                             }
                             rf.LastApplied = rf.CommitIndex
-                            rf.mu.Unlock()
                         }
                     }
                 }
@@ -577,7 +579,7 @@ func (rf *Raft) leaderSyncFollower(server int) {
         case <-time.After(100 * time.Millisecond):
             continue
         }
-        time.Sleep(time.Millisecond * 20)
+        time.Sleep(time.Millisecond * 50)
     }
 
     return
@@ -658,7 +660,7 @@ func (rf *Raft) loop() {
             ch := make(chan bool)
             go rf.election(ch)
             select {
-            case <-time.After(time.Millisecond * heartbeatsTimeout() * 3):
+            case <-time.After(time.Millisecond * heartbeatsTimeout()):
                 if rf.State == StateCandidate{
                     rf.CurrentTerm += 1
                     rf.VotedFor = rf.me
