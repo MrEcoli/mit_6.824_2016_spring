@@ -25,6 +25,7 @@ import (
 	"labrpc"
 	"math/rand"
 	"time"
+	//"fmt"
 )
 
 // import "bytes"
@@ -33,7 +34,6 @@ import (
 var StateLeader = 2
 var StateCandidate = 1
 var StateFollower = 0
-var StateKill = 4
 
 //
 // as each Raft peer becomes aware that successive log entries are
@@ -113,13 +113,14 @@ func (rf *Raft) persist() {
 
 	w := new(bytes.Buffer)
 	e := gob.NewEncoder(w)
-	e.Encode(rf.CurrentTerm)
 	e.Encode(rf.VotedFor)
+	e.Encode(rf.CurrentTerm)
 	e.Encode(rf.Logs)
 	e.Encode(rf.CommitIndex)
 	e.Encode(rf.LastApplied)
 	data := w.Bytes()
 	rf.persister.SaveRaftState(data)
+
 }
 
 //
@@ -176,7 +177,6 @@ func (rf *Raft) RequestVote(args RequestVoteArgs, reply *RequestVoteReply) {
 	// Your code here.
 
 	// Candidate's log should up-to-date
-	//fmt.Println("RequestVote RPC from candidate:", args.Candidate, " to server ", rf.me, " server statue: ", rf.State, "args: ", args)
 
 	changed := false
 
@@ -281,7 +281,6 @@ type AppendEntriesReply struct {
 
 func (rf *Raft) AppendEntries(args AppendEntriesArgs, reply *AppendEntriesReply) {
 
-	//fmt.Println("server:", rf.me,", currentTerm", rf.CurrentTerm, ", state: ",rf.State, "recevie appendEntries from leader", args.LeaderId, ", leaderTerm", args.LeaderTerm, ";TimeStamp", time.Now())
 
 	changed := false
 
@@ -400,7 +399,6 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 		rf.Logs = append(rf.Logs, Entry{Command: command, Term: rf.CurrentTerm})
 		rf.persist()
 	}
-	//fmt.Println("Command", command, "; rf.Logs", rf.Logs, "rf.State", rf.State)
 	return index, term, isLeader
 }
 
@@ -455,7 +453,7 @@ func (rf *Raft) voteResult(rpc_results chan int, replies []*RequestVoteReply, ch
 			} else {
 				if replies[server].VoteGrant {
 					count += 1
-					if count*2 > n {
+					if count*2 > n && rf.State == StateCandidate {
 						rf.State = StateLeader
 						entry := Entry{}
 						entry.Term = rf.CurrentTerm
@@ -469,6 +467,7 @@ func (rf *Raft) voteResult(rpc_results chan int, replies []*RequestVoteReply, ch
 						}
 						rf.persist()
 						ch <- true
+						return
 					}
 				} else {
 					if replies[server].Term > rf.CurrentTerm {
@@ -492,7 +491,7 @@ func (rf *Raft) election(ch chan bool) {
 	req_args.CandidateTerm = rf.CurrentTerm
 	req_args.Candidate = rf.me
 	if len(rf.Logs) > 0 {
-		req_args.LastLogIndex = len(rf.Logs)
+		req_args.LastLogIndex = len(rf.Logs) - 1
 		req_args.LastLogTerm = rf.Logs[len(rf.Logs)-1].Term
 	} else {
 		req_args.LastLogIndex = -1
@@ -520,14 +519,6 @@ func (rf *Raft) leaderSyncFollower(server int) {
 	args.LeaderTerm = rf.CurrentTerm
 	count := 0
 
-	//defer func(){
-	//    fmt.Println()
-	//    if err:= recover(); err != nil {
-	//        fmt.Println("leader", rf.me, "server", server, "rf.Logs", rf.Logs, ", rf.NextIndex[server]:", rf.NextIndex[server],"rf.MatchIndex[server]:", rf.MatchIndex[server])
-	//        panic("return")
-	//    }
-	//}()
-	rf.persist()
 	for rf.State == StateLeader {
 		count += 1
 
@@ -545,7 +536,6 @@ func (rf *Raft) leaderSyncFollower(server int) {
 		rpc_rs := make(chan bool)
 		go rf.sendAppendEntries(server, args, &reply, rpc_rs)
 
-		//fmt.Println("###leader", rf.me, "; currentTerm", rf.CurrentTerm, "server", server, "rf.Logs", rf.Logs, ", rf.NextIndex[server]:", rf.NextIndex[server],"rf.MatchIndex[server]:", rf.MatchIndex[server])
 
 		select {
 		case ok := <-rpc_rs:
@@ -554,7 +544,6 @@ func (rf *Raft) leaderSyncFollower(server int) {
 					if !reply.Success {
 						if reply.Term > rf.CurrentTerm {
 							rf.State = StateFollower
-							rf.persist()
 						} else {
 							if len(args.Data) > 0 && rf.NextIndex[server]-1 > rf.MatchIndex[server] {
 								rf.NextIndex[server] -= 1
@@ -595,8 +584,8 @@ func (rf *Raft) leaderSyncFollower(server int) {
 								rf.mu.Unlock()
 							}
 							rf.LastApplied = rf.CommitIndex
-							rf.persist()
 						}
+                        rf.persist()
 					}
 				}
 
@@ -649,7 +638,6 @@ func (rf *Raft) loop() {
 				}
 			}
 		} else if rf.State == StateCandidate {
-			//fmt.Println("Candidate loop server", rf.me, " currentTerm", rf.CurrentTerm, "; timeStamp:",  time.Now())
 			ch := make(chan bool)
 			go rf.election(ch)
 			select {
@@ -669,7 +657,6 @@ func (rf *Raft) loop() {
 }
 
 func Make(peers []*labrpc.ClientEnd, me int, persister *Persister, applyCh chan ApplyMsg) *Raft {
-	//fmt.Println("supplied Perisister is", persister)
 	rf := &Raft{}
 	rf.peers = peers
 	rf.persister = persister
