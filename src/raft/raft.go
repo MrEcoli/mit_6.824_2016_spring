@@ -26,6 +26,7 @@ import (
 	"math/rand"
 	"time"
 	//"fmt"
+	"fmt"
 )
 
 // import "bytes"
@@ -291,6 +292,10 @@ func (rf *Raft) AppendEntries(args AppendEntriesArgs, reply *AppendEntriesReply)
 		if rf.CurrentTerm < args.LeaderTerm {
 			changed = true
 			rf.CurrentTerm = args.LeaderTerm
+			rf.VotedFor = args.LeaderId
+		} else {
+			rf.VotedFor = args.LeaderId
+			changed = true
 		}
 		reply.Term = rf.CurrentTerm
 
@@ -443,6 +448,9 @@ func (rf *Raft) voteResult(rpc_results chan int, replies []*RequestVoteReply, ch
 	}
 	count := 1
 	n := len(rf.peers)
+
+	//granted_votes := make([]int, len(rf.peers))
+	//granted_votes[rf.me] = 1
 	for {
 		if rf.State != StateCandidate {
 			return
@@ -451,7 +459,8 @@ func (rf *Raft) voteResult(rpc_results chan int, replies []*RequestVoteReply, ch
 			if server < 0 {
 				continue
 			} else {
-				if replies[server].VoteGrant {
+				//granted_votes[server] = 1
+				if replies[server].VoteGrant && replies[server].Term == rf.CurrentTerm {
 					count += 1
 					if count*2 > n && rf.State == StateCandidate {
 						rf.State = StateLeader
@@ -467,6 +476,14 @@ func (rf *Raft) voteResult(rpc_results chan int, replies []*RequestVoteReply, ch
 						}
 						rf.persist()
 						ch <- true
+						//fmt.Println("server: ", rf.me, " New Leader", " Term", rf.CurrentTerm)
+						//fmt.Print("recevie vote from ")
+						//for idx, v := range granted_votes {
+						//	if v == 1{
+						//		fmt.Print(idx, " ")
+						//	}
+						//}
+						//fmt.Println()
 						return
 					}
 				} else {
@@ -544,12 +561,22 @@ func (rf *Raft) leaderSyncFollower(server int) {
 					if !reply.Success {
 						if reply.Term > rf.CurrentTerm {
 							rf.State = StateFollower
-						} else {
+							rf.CurrentTerm = reply.Term
+							rf.VotedFor = -1
+						} else if reply.Term == rf.CurrentTerm {
 							if len(args.Data) > 0 && rf.NextIndex[server]-1 > rf.MatchIndex[server] {
 								rf.NextIndex[server] -= 1
+								termOfIndex := rf.Logs[rf.NextIndex[server]].Term
+								for i := rf.NextIndex[server] - 1; i > rf.MatchIndex[server] + 1; i -= 1 {
+									if rf.Logs[i].Term != termOfIndex {
+										rf.NextIndex[server] = i
+										break
+									}
+								}
+
 							}
 						}
-					} else {
+					} else if reply.Term == rf.CurrentTerm {
 						if len(args.Data) > 0 {
 							rf.MatchIndex[server] = len(args.Data) + args.LastLogIndex - 1
 							rf.NextIndex[server] = len(args.Data) + args.LastLogIndex
@@ -677,4 +704,9 @@ func Make(peers []*labrpc.ClientEnd, me int, persister *Persister, applyCh chan 
 
 	go rf.loop()
 	return rf
+}
+
+
+func (rf *Raft) PrintState(){
+	fmt.Println("server: ", rf.me, " state:", rf.State, " term: ", rf.CurrentTerm, " votedFor:", rf.VotedFor, " commitIndex", rf.CommitIndex, " lastApplied: ", rf.LastApplied, " Logs", rf.Logs, "\n\n")
 }
