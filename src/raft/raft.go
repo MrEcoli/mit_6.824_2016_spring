@@ -35,6 +35,7 @@ import (
 var StateLeader = 2
 var StateCandidate = 1
 var StateFollower = 0
+var StateKill = -1
 
 //
 // as each Raft peer becomes aware that successive log entries are
@@ -87,11 +88,9 @@ type Entry struct {
 // believes it is the leader.
 func (rf *Raft) GetState() (int, bool) {
 
-	var isleader bool
+	isleader := false
 	if rf.State == StateLeader {
 		isleader = true
-	} else {
-		isleader = false
 	}
 
 	return rf.CurrentTerm, isleader
@@ -114,6 +113,7 @@ func (rf *Raft) persist() {
 
 	w := new(bytes.Buffer)
 	e := gob.NewEncoder(w)
+	e.Encode(rf.State)
 	e.Encode(rf.VotedFor)
 	e.Encode(rf.CurrentTerm)
 	e.Encode(rf.Logs)
@@ -137,6 +137,7 @@ func (rf *Raft) readPersist(data []byte) {
 
 	r := bytes.NewBuffer(data)
 	d := gob.NewDecoder(r)
+	d.Decode(&rf.State)
 	d.Decode(&rf.VotedFor)
 	d.Decode(&rf.CurrentTerm)
 	d.Decode(&rf.Logs)
@@ -175,53 +176,42 @@ type RequestVoteReply struct {
 // RequestVote() RPC handler so that servers will vote for one another.
 
 func (rf *Raft) RequestVote(args RequestVoteArgs, reply *RequestVoteReply) {
-	// Your code here.
-
 	// Candidate's log should up-to-date
 
-	changed := false
-
-	reply.Term = rf.CurrentTerm
 	if rf.CurrentTerm > args.CandidateTerm {
 		reply.VoteGrant = false
-	} else {
-		if rf.CurrentTerm < args.CandidateTerm {
-			changed = true
-			rf.CurrentTerm = args.CandidateTerm
-			rf.State = StateFollower
-			rf.VotedFor = -1
+		reply.Term = rf.CurrentTerm
+	} else if rf.CurrentTerm == args.CandidateTerm {
+		if rf.VotedFor == -1 || rf.VotedFor == args.Candidate {
 			if rf.isLogUpToDate(args) {
-				rf.VotedFor = args.Candidate
 				reply.VoteGrant = true
 				reply.Term = rf.CurrentTerm
-			} else {
-				reply.VoteGrant = false
-				reply.Term = rf.CurrentTerm
+				rf.VotedFor = args.Candidate
+				if rf.State != StateFollower {
+					rf.State = StateFollower
+				}
+				rf.persist()
 			}
 		} else {
-			if rf.VotedFor == -1 || rf.VotedFor == args.Candidate {
-				if rf.isLogUpToDate(args) {
-					changed = true
-					reply.VoteGrant = true
-					reply.Term = rf.CurrentTerm
-					rf.VotedFor = args.Candidate
-				}
-			} else {
-				reply.VoteGrant = false
-				reply.Term = rf.CurrentTerm
-			}
+			reply.VoteGrant = false
+			reply.Term = rf.CurrentTerm
 		}
-	}
-	if rf.State != StateFollower && reply.VoteGrant {
-		changed = true
+	} else {
+		rf.CurrentTerm = args.CandidateTerm
+		reply.Term = rf.CurrentTerm
 		rf.State = StateFollower
+		rf.VotedFor = -1
+		if rf.isLogUpToDate(args) {
+			rf.VotedFor = args.Candidate
+			reply.VoteGrant = true
+		} else {
+			reply.VoteGrant = false
+			reply.Term = rf.CurrentTerm
+		}
+		rf.persist()
 	}
 
 	rf.requests <- 1
-
-	if changed {
-		rf.persist()
-	}
 
 }
 
@@ -282,67 +272,39 @@ type AppendEntriesReply struct {
 
 func (rf *Raft) AppendEntries(args AppendEntriesArgs, reply *AppendEntriesReply) {
 
-
-	changed := false
-
 	if rf.CurrentTerm > args.LeaderTerm {
 		reply.Success = false
 		reply.Term = rf.CurrentTerm
 	} else {
+		changed := false
 		if rf.CurrentTerm < args.LeaderTerm {
-			changed = true
 			rf.CurrentTerm = args.LeaderTerm
 			rf.VotedFor = args.LeaderId
-		} else {
-			rf.VotedFor = args.LeaderId
 			changed = true
+		} else {
+			if rf.VotedFor != args.LeaderId {
+				rf.VotedFor = args.LeaderId
+				changed = true
+			}
 		}
 		reply.Term = rf.CurrentTerm
 
-		if rf.State != StateFollower {
+		if rf.State == StateFollower || rf.State == StateLeader {
 			rf.State = StateFollower
 			changed = true
 		}
 
-		if args.LastLogIndex > len(rf.Logs) {
-			reply.Success = false
-		} else if len(rf.Logs) == args.LastLogIndex && len(rf.Logs) > 0 {
-			if len(args.Data) > 0 {
-				reply.Success = false
-			} else {
-				reply.Success = true
-				rf.CommitIndex = args.LeaderCommitedIndex
-
-				if rf.CommitIndex > rf.LastApplied {
-					for i := rf.LastApplied + 1; i <= rf.CommitIndex; i += 1 {
-						if rf.Logs[i].Command != nil {
-							msg := ApplyMsg{}
-							msg.Index = i
-							msg.Command = rf.Logs[i].Command
-							rf.AppliedMsgs <- msg
-						}
-					}
-				}
-				rf.LastApplied = rf.CommitIndex
-				changed = true
-			}
+		if len(args.Data) == 0 {
+			reply.Success = true
 		} else {
-			if len(rf.Logs) == args.LastLogIndex || rf.Logs[args.LastLogIndex].Term == args.LastLogTerm {
+			if args.LastLogIndex > len(rf.Logs) {
+				reply.Success = false
+			} else if len(rf.Logs) == args.LastLogIndex && len(rf.Logs) > 0 {
 				if len(args.Data) > 0 {
-					for i := 0; i < len(args.Data); i += 1 {
-						if i+args.LastLogIndex >= len(rf.Logs) {
-							rf.Logs = append(rf.Logs, args.Data[i])
-						} else {
-							rf.Logs[i+args.LastLogIndex] = args.Data[i]
-						}
-					}
-					curIndex := len(args.Data) + args.LastLogIndex - 1
-
-					if curIndex < args.LeaderCommitedIndex {
-						rf.CommitIndex = curIndex
-					} else {
-						rf.CommitIndex = args.LeaderCommitedIndex
-					}
+					reply.Success = false
+				} else {
+					reply.Success = true
+					rf.CommitIndex = args.LeaderCommitedIndex
 
 					if rf.CommitIndex > rf.LastApplied {
 						for i := rf.LastApplied + 1; i <= rf.CommitIndex; i += 1 {
@@ -355,24 +317,56 @@ func (rf *Raft) AppendEntries(args AppendEntriesArgs, reply *AppendEntriesReply)
 						}
 					}
 					rf.LastApplied = rf.CommitIndex
-				}
-				reply.Success = true
-				changed = true
-			} else {
-				if len(rf.Logs) > args.LastLogIndex {
-					rf.Logs = rf.Logs[:args.LastLogIndex]
 					changed = true
 				}
-				reply.Success = false
+			} else {
+				if len(rf.Logs) == args.LastLogIndex || rf.Logs[args.LastLogIndex].Term == args.LastLogTerm {
+					if len(args.Data) > 0 {
+						for i := 0; i < len(args.Data); i += 1 {
+							if i+args.LastLogIndex >= len(rf.Logs) {
+								rf.Logs = append(rf.Logs, args.Data[i])
+							} else {
+								rf.Logs[i+args.LastLogIndex] = args.Data[i]
+							}
+						}
+						curIndex := len(args.Data) + args.LastLogIndex - 1
+
+						if curIndex < args.LeaderCommitedIndex {
+							rf.CommitIndex = curIndex
+						} else {
+							rf.CommitIndex = args.LeaderCommitedIndex
+						}
+
+						if rf.CommitIndex > rf.LastApplied {
+							for i := rf.LastApplied + 1; i <= rf.CommitIndex; i += 1 {
+								if rf.Logs[i].Command != nil {
+									msg := ApplyMsg{}
+									msg.Index = i
+									msg.Command = rf.Logs[i].Command
+									rf.AppliedMsgs <- msg
+								}
+							}
+						}
+						rf.LastApplied = rf.CommitIndex
+					}
+					reply.Success = true
+					changed = true
+				} else {
+					if len(rf.Logs) > args.LastLogIndex {
+						rf.Logs = rf.Logs[:args.LastLogIndex]
+						changed = true
+					}
+					reply.Success = false
+				}
 			}
 		}
+
+		if changed {
+			rf.persist()
+		}
+		rf.requests <- 2
 	}
 
-	if changed {
-		rf.persist()
-	}
-
-	rf.requests <- 2
 }
 
 func (rf *Raft) sendAppendEntries(server int, args AppendEntriesArgs, reply *AppendEntriesReply, ch chan bool) {
@@ -415,6 +409,9 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 //
 func (rf *Raft) Kill() {
 	// Your code here, if desired.
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	rf.State = StateKill
 }
 
 func heartbeatsTimeout() time.Duration {
@@ -553,11 +550,10 @@ func (rf *Raft) leaderSyncFollower(server int) {
 		rpc_rs := make(chan bool)
 		go rf.sendAppendEntries(server, args, &reply, rpc_rs)
 
-
 		select {
 		case ok := <-rpc_rs:
 			{
-				if ok {
+				if ok && rf.State == StateLeader {
 					if !reply.Success {
 						if reply.Term > rf.CurrentTerm {
 							rf.State = StateFollower
@@ -565,15 +561,18 @@ func (rf *Raft) leaderSyncFollower(server int) {
 							rf.VotedFor = -1
 						} else if reply.Term == rf.CurrentTerm {
 							if len(args.Data) > 0 && rf.NextIndex[server]-1 > rf.MatchIndex[server] {
-								rf.NextIndex[server] -= 1
-								termOfIndex := rf.Logs[rf.NextIndex[server]].Term
-								for i := rf.NextIndex[server] - 1; i > rf.MatchIndex[server] + 1; i -= 1 {
-									if rf.Logs[i].Term != termOfIndex {
-										rf.NextIndex[server] = i
-										break
+								if rf.NextIndex[server] >= len(rf.Logs) {
+									rf.NextIndex[server] -= 1
+								} else {
+									termOfIndex := rf.Logs[rf.NextIndex[server]].Term
+									rf.NextIndex[server] -= 1
+									for i := rf.NextIndex[server] - 1; i > rf.MatchIndex[server]+1; i -= 1 {
+										if rf.Logs[i].Term != termOfIndex {
+											rf.NextIndex[server] = i
+											break
+										}
 									}
 								}
-
 							}
 						}
 					} else if reply.Term == rf.CurrentTerm {
@@ -612,7 +611,7 @@ func (rf *Raft) leaderSyncFollower(server int) {
 							}
 							rf.LastApplied = rf.CommitIndex
 						}
-                        rf.persist()
+						rf.persist()
 					}
 				}
 
@@ -679,6 +678,8 @@ func (rf *Raft) loop() {
 			}
 		} else if rf.State == StateLeader {
 			rf.leaderWork()
+		} else if rf.State == StateKill {
+			break
 		}
 	}
 }
@@ -706,7 +707,6 @@ func Make(peers []*labrpc.ClientEnd, me int, persister *Persister, applyCh chan 
 	return rf
 }
 
-
-func (rf *Raft) PrintState(){
+func (rf *Raft) PrintState() {
 	fmt.Println("server: ", rf.me, " state:", rf.State, " term: ", rf.CurrentTerm, " votedFor:", rf.VotedFor, " commitIndex", rf.CommitIndex, " lastApplied: ", rf.LastApplied, " Logs", rf.Logs, "\n\n")
 }
