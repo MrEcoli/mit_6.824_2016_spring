@@ -21,7 +21,6 @@ import "sync"
 import (
 	"bytes"
 	"encoding/gob"
-	_ "fmt"
 	"labrpc"
 	"math/rand"
 	"time"
@@ -32,10 +31,10 @@ import (
 // import "bytes"
 // import "encoding/gob"
 
-var StateLeader = 2
-var StateCandidate = 1
-var StateFollower = 0
-var StateKill = -1
+const StateLeader = 2
+const StateCandidate = 1
+const StateFollower = 0
+const StateKill = -1
 
 //
 // as each Raft peer becomes aware that successive log entries are
@@ -88,12 +87,12 @@ type Entry struct {
 // believes it is the leader.
 func (rf *Raft) GetState() (int, bool) {
 
-	isleader := false
+	isLeader := false
 	if rf.State == StateLeader {
-		isleader = true
+		isLeader = true
 	}
 
-	return rf.CurrentTerm, isleader
+	return rf.CurrentTerm, isLeader
 }
 
 //
